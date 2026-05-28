@@ -639,6 +639,10 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request, user User
 		s.deleteRecord(w, r, user, subID, parts[0])
 		return
 	}
+	if len(parts) == 1 && r.Method == http.MethodPatch {
+		s.updateRecord(w, r, user, subID, parts[0])
+		return
+	}
 	writeError(w, http.StatusNotFound, "route not found")
 }
 
@@ -766,6 +770,87 @@ func (s *Server) createRecord(w http.ResponseWriter, r *http.Request, user User,
 		return
 	}
 	writeJSON(w, http.StatusCreated, DNSRecord{ID: id, SubdomainID: subID, CloudflareRecordID: cfRecordID, Type: recordType, Name: name, Content: content, TTL: req.TTL, Proxied: req.Proxied, CreatedAt: s.now()})
+}
+
+func (s *Server) updateRecord(w http.ResponseWriter, r *http.Request, user User, subID, recordID string) {
+	var req struct {
+		Type    string `json:"type"`
+		Name    string `json:"name"`
+		Content string `json:"content"`
+		TTL     int    `json:"ttl"`
+		Proxied bool   `json:"proxied"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	recordType := strings.ToUpper(strings.TrimSpace(req.Type))
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "@"
+	}
+	content := strings.TrimSpace(req.Content)
+	if !slices.Contains(recordTypes, recordType) || !namePattern.MatchString(name) || strings.Contains(name, "..") {
+		writeError(w, http.StatusBadRequest, "invalid DNS record name or type")
+		return
+	}
+	if err := validateDNSRecordContent(recordType, content); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.TTL == 0 {
+		req.TTL = 1
+	}
+	if !slices.Contains(ttls, req.TTL) {
+		writeError(w, http.StatusBadRequest, "invalid ttl")
+		return
+	}
+	if req.Proxied && !slices.Contains([]string{"A", "AAAA", "CNAME"}, recordType) {
+		writeError(w, http.StatusBadRequest, "proxied records must be A, AAAA, or CNAME")
+		return
+	}
+
+	var status, prefix, domainName, zoneID, encryptedToken, cfRecordID string
+	var createdAt time.Time
+	err := s.db.QueryRowContext(r.Context(), `SELECT s.status, s.prefix, d.name, d.zone_id, d.api_token_encrypted, COALESCE(dr.cloudflare_record_id, ''), dr.created_at
+		FROM dns_records dr JOIN subdomains s ON s.id = dr.subdomain_id JOIN domains d ON d.id = s.domain_id
+		WHERE dr.id = ? AND dr.subdomain_id = ? AND (s.owner_id = ? OR ? = 'admin')`, recordID, subID, user.ID, user.Role).
+		Scan(&status, &prefix, &domainName, &zoneID, &encryptedToken, &cfRecordID, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "record not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load record")
+		return
+	}
+	if status != "active" {
+		writeError(w, http.StatusBadRequest, "DNS records can only be changed for active subdomains")
+		return
+	}
+	if cfRecordID == "" {
+		writeError(w, http.StatusBadRequest, "record is not linked to a Cloudflare DNS record")
+		return
+	}
+	token, err := s.decrypt(encryptedToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not decrypt Cloudflare token")
+		return
+	}
+	fullName := recordName(name, prefix, domainName)
+	if err := s.cloudflareUpdateRecord(r.Context(), zoneID, token, cfRecordID, DNSRecord{Type: recordType, Name: fullName, Content: content, TTL: req.TTL, Proxied: req.Proxied}); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	res, err := s.db.ExecContext(r.Context(), `UPDATE dns_records SET type = ?, name = ?, content = ?, ttl = ?, proxied = ? WHERE id = ? AND subdomain_id = ?`, recordType, name, content, req.TTL, req.Proxied, recordID, subID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not update record")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		writeError(w, http.StatusNotFound, "record not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, DNSRecord{ID: recordID, SubdomainID: subID, CloudflareRecordID: cfRecordID, Type: recordType, Name: name, Content: content, TTL: req.TTL, Proxied: req.Proxied, CreatedAt: createdAt})
 }
 
 func (s *Server) syncRecords(w http.ResponseWriter, r *http.Request, user User, subID string) {
@@ -1376,6 +1461,29 @@ func (s *Server) cloudflareCreateRecord(ctx context.Context, zoneID, token strin
 		return "", fmt.Errorf("Cloudflare create record failed: %s", cloudflareError(response.Errors))
 	}
 	return response.Result.ID, nil
+}
+
+func (s *Server) cloudflareUpdateRecord(ctx context.Context, zoneID, token, recordID string, record DNSRecord) error {
+	body := map[string]any{
+		"type":    record.Type,
+		"name":    record.Name,
+		"content": record.Content,
+		"ttl":     record.TTL,
+		"proxied": record.Proxied,
+	}
+	var response struct {
+		Success bool `json:"success"`
+		Errors  []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := s.cloudflareRequest(ctx, http.MethodPatch, zoneID, token, "/dns_records/"+url.PathEscape(recordID), body, &response); err != nil {
+		return err
+	}
+	if !response.Success {
+		return fmt.Errorf("Cloudflare update record failed: %s", cloudflareError(response.Errors))
+	}
+	return nil
 }
 
 func (s *Server) cloudflareDeleteRecord(ctx context.Context, zoneID, token, recordID string) error {

@@ -3,15 +3,53 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, KeyRound, Plus, RotateCw } from "lucide-react";
 import { api } from "@/lib/api";
-import { ApiToken } from "@/lib/mock-data";
+import { ApiToken, DnsRecordType } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { toast } from "sonner";
+
+const recordTypes: DnsRecordType[] = ["A", "AAAA", "CNAME", "TXT", "MX", "NS"];
+
+const recordExamples: Record<DnsRecordType, { content: string; proxied: boolean }> = {
+  A: { content: "192.0.2.10", proxied: false },
+  AAAA: { content: "2001:db8::10", proxied: false },
+  CNAME: { content: "target.example.com", proxied: false },
+  TXT: { content: "verification=example-token", proxied: false },
+  MX: { content: "10 mail.example.com", proxied: false },
+  NS: { content: "ns1.example.com", proxied: false },
+};
+
+function apiBaseUrl() {
+  return process.env.NEXT_PUBLIC_API_BASE_URL || "/api/v1";
+}
+
+function curlCommand(type: DnsRecordType) {
+  const example = recordExamples[type];
+  const body = JSON.stringify(
+    {
+      type,
+      name: "@",
+      content: example.content,
+      ttl: 1,
+      proxied: example.proxied,
+    },
+    null,
+    2
+  );
+
+  return [
+    `curl -X POST "${apiBaseUrl()}/subdomains/<subdomain_id>/records" \\`,
+    `  -H "Authorization: Bearer <api_token>" \\`,
+    `  -H "Content-Type: application/json" \\`,
+    `  -d '${body}'`,
+  ].join("\n");
+}
 
 export default function ApiTokens() {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
@@ -20,21 +58,27 @@ export default function ApiTokens() {
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
   const [generatedTokenName, setGeneratedTokenName] = useState("");
   const [copied, setCopied] = useState(false);
+  const [copiedCurl, setCopiedCurl] = useState(false);
+  const [curlRecordType, setCurlRecordType] = useState<DnsRecordType>("A");
   const [busyTokenId, setBusyTokenId] = useState("");
   const [error, setError] = useState("");
   const [confirmAction, setConfirmAction] = useState<{ type: "rotate" | "revoke"; id: string } | null>(null);
 
-  const load = async () => {
-    try {
-      const nextTokens = await api.tokens();
-      setTokens(Array.isArray(nextTokens) ? nextTokens : []);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to load tokens");
-    }
-  };
-
   useEffect(() => {
-    load();
+    let active = true;
+    async function loadTokens() {
+      try {
+        const nextTokens = await api.tokens();
+        if (active) setTokens(Array.isArray(nextTokens) ? nextTokens : []);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to load tokens");
+      }
+    }
+
+    void loadTokens();
+    return () => {
+      active = false;
+    };
   }, []);
 
   const handleGenerate = async (e: React.FormEvent) => {
@@ -59,6 +103,13 @@ export default function ApiTokens() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
     toast.success("Token copied");
+  };
+
+  const handleCopyCurl = async () => {
+    await navigator.clipboard.writeText(curlCommand(curlRecordType));
+    setCopiedCurl(true);
+    setTimeout(() => setCopiedCurl(false), 2000);
+    toast.success("curl command copied");
   };
 
   const handleRevoke = async (id: string) => {
@@ -141,6 +192,32 @@ export default function ApiTokens() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+
+      <div className="border rounded-lg bg-white dark:bg-slate-900 shadow-sm p-4 space-y-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div className="space-y-1">
+            <h3 className="font-semibold text-lg">curl Usage Example</h3>
+            <p className="text-sm text-slate-500">Use an API token as a bearer token to create DNS records programmatically.</p>
+          </div>
+          <div className="flex items-end gap-2">
+            <div className="space-y-2">
+              <Label>Record Type</Label>
+              <Select value={curlRecordType} onValueChange={(value) => value && setCurlRecordType(value as DnsRecordType)}>
+                <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {recordTypes.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button variant="outline" size="icon" onClick={handleCopyCurl} title="Copy curl command">
+              {copiedCurl ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
+            </Button>
+          </div>
+        </div>
+        <pre className="overflow-x-auto rounded-md bg-slate-950 p-4 text-sm text-slate-100">
+          <code>{curlCommand(curlRecordType)}</code>
+        </pre>
+      </div>
 
       <div className="border rounded-lg bg-white dark:bg-slate-900 shadow-sm overflow-hidden">
         <Table>

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowLeft, Plus, Trash2, Cloud, CloudOff, RefreshCw } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Cloud, CloudOff, RefreshCw, Pencil } from "lucide-react";
 import { api } from "@/lib/api";
 import { DnsRecord, Subdomain } from "@/lib/mock-data";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [isAddOpen, setIsAddOpen] = useState(false);
+  const [editingRecord, setEditingRecord] = useState<DnsRecord | null>(null);
   const [type, setType] = useState<DnsRecord["type"]>("A");
   const [name, setName] = useState("@");
   const [content, setContent] = useState("");
@@ -30,20 +31,24 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
   const [confirmRecordId, setConfirmRecordId] = useState("");
   const [confirmSubdomainDelete, setConfirmSubdomainDelete] = useState(false);
 
-  const loadRecords = async () => {
-    setLoading(true);
-    try {
-      const nextRecords = await api.records(subdomain.id);
-      setRecords(Array.isArray(nextRecords) ? nextRecords : []);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to load DNS records");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    loadRecords();
+    let active = true;
+    async function loadRecords() {
+      setLoading(true);
+      try {
+        const nextRecords = await api.records(subdomain.id);
+        if (active) setRecords(Array.isArray(nextRecords) ? nextRecords : []);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to load DNS records");
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void loadRecords();
+    return () => {
+      active = false;
+    };
   }, [subdomain.id]);
 
   const resetForm = () => {
@@ -52,6 +57,22 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
     setContent("");
     setTtl(1);
     setProxied(false);
+    setFormError("");
+  };
+
+  const setRecordType = (value: DnsRecord["type"]) => {
+    setType(value);
+    if (!canProxy(value)) setProxied(false);
+  };
+
+  const openEdit = (record: DnsRecord) => {
+    setEditingRecord(record);
+    setType(record.type);
+    setName(record.name);
+    setContent(record.content);
+    setTtl(record.ttl);
+    setProxied(record.proxied);
+    setFormError("");
   };
 
   const handleAddSubmit = async (e: React.FormEvent) => {
@@ -78,6 +99,38 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
       toast.success("DNS record added.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to add DNS record";
+      setFormError(message);
+      toast.error(message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRecord) return;
+    setSaving(true);
+    setFormError("");
+    const validationError = validateRecordContent(type, content);
+    if (validationError) {
+      setFormError(validationError);
+      setSaving(false);
+      return;
+    }
+    try {
+      const updated = await api.updateRecord(subdomain.id, editingRecord.id, {
+        type,
+        name: name.trim() || "@",
+        content: content.trim(),
+        ttl,
+        proxied,
+      });
+      setRecords(records.map((record) => record.id === updated.id ? updated : record));
+      setEditingRecord(null);
+      resetForm();
+      toast.success("DNS record updated.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to update DNS record";
       setFormError(message);
       toast.error(message);
     } finally {
@@ -166,7 +219,7 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
             <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
             {syncing ? "Syncing..." : "Sync"}
           </Button>
-          <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+          <Dialog open={isAddOpen} onOpenChange={(open) => { setIsAddOpen(open); if (!open) resetForm(); }}>
           <Button className="gap-2" onClick={() => setIsAddOpen(true)}>
             <Plus className="h-4 w-4" />
             Add Record
@@ -185,7 +238,7 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
               <div className="grid grid-cols-4 gap-4">
                 <div className="space-y-2">
                   <Label>Type</Label>
-                  <Select value={type} onValueChange={(value) => value && setType(value as DnsRecord["type"])}>
+                  <Select value={type} onValueChange={(value) => value && setRecordType(value as DnsRecord["type"])}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {["A", "AAAA", "CNAME", "TXT", "MX", "NS"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
@@ -202,7 +255,7 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
                 <Input value={content} onChange={(e) => setContent(e.target.value)} placeholder="192.168.1.1" required />
               </div>
               <div className="flex items-center justify-between">
-                <Button type="button" variant={proxied ? "default" : "outline"} className={`gap-2 h-8 ${proxied ? "bg-orange-500 hover:bg-orange-600" : ""}`} onClick={() => setProxied(!proxied)}>
+                <Button type="button" variant={proxied ? "default" : "outline"} className={`gap-2 h-8 ${proxied ? "bg-orange-500 hover:bg-orange-600" : ""}`} onClick={() => setProxied(!proxied)} disabled={!canProxy(type)}>
                   {proxied ? <Cloud className="h-4 w-4" /> : <CloudOff className="h-4 w-4" />}
                   {proxied ? "Proxied" : "DNS only"}
                 </Button>
@@ -224,6 +277,58 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
         </div>
       </div>
 
+      <Dialog open={!!editingRecord} onOpenChange={(open) => { if (!open) { setEditingRecord(null); resetForm(); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit DNS Record</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleEditSubmit} className="space-y-4 pt-4">
+            {formError && (
+              <Alert variant="destructive">
+                <AlertTitle>Could not update DNS record</AlertTitle>
+                <AlertDescription>{formError}</AlertDescription>
+              </Alert>
+            )}
+            <div className="grid grid-cols-4 gap-4">
+              <div className="space-y-2">
+                <Label>Type</Label>
+                <Select value={type} onValueChange={(value) => value && setRecordType(value as DnsRecord["type"])}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {["A", "AAAA", "CNAME", "TXT", "MX", "NS"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="col-span-3 space-y-2">
+                <Label>Name</Label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="@" required />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Content</Label>
+              <Input value={content} onChange={(e) => setContent(e.target.value)} placeholder="192.168.1.1" required />
+            </div>
+            <div className="flex items-center justify-between">
+              <Button type="button" variant={proxied ? "default" : "outline"} className={`gap-2 h-8 ${proxied ? "bg-orange-500 hover:bg-orange-600" : ""}`} onClick={() => setProxied(!proxied)} disabled={!canProxy(type)}>
+                {proxied ? <Cloud className="h-4 w-4" /> : <CloudOff className="h-4 w-4" />}
+                {proxied ? "Proxied" : "DNS only"}
+              </Button>
+              <Select value={ttlLabel(ttl)} onValueChange={(value) => setTtl(ttlValue(value))}>
+                <SelectTrigger className="w-[120px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Auto">Auto</SelectItem>
+                  <SelectItem value="1 min">1 min</SelectItem>
+                  <SelectItem value="1 hr">1 hr</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <DialogFooter>
+              <Button type="submit" disabled={saving}>{saving ? "Saving..." : "Save Changes"}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {pageError && (
         <Alert variant="destructive">
           <AlertTitle>DNS operation failed</AlertTitle>
@@ -240,7 +345,7 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
               <TableHead>Content</TableHead>
               <TableHead>Proxy</TableHead>
               <TableHead>TTL</TableHead>
-              <TableHead className="w-[80px]" />
+              <TableHead className="w-[96px]" />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -251,7 +356,12 @@ export default function DnsManager({ subdomain, onBack, onDeleted }: { subdomain
                 <TableCell className="font-mono text-sm">{record.content}</TableCell>
                 <TableCell>{record.proxied ? <Cloud className="h-5 w-5 text-orange-500" /> : <CloudOff className="h-5 w-5 text-slate-300" />}</TableCell>
                 <TableCell>{record.ttl === 1 ? "Auto" : `${record.ttl}s`}</TableCell>
-                <TableCell><Button variant="ghost" size="icon" onClick={() => setConfirmRecordId(record.id)}><Trash2 className="h-4 w-4 text-red-500" /></Button></TableCell>
+                <TableCell>
+                  <div className="flex justify-end gap-1">
+                    <Button variant="ghost" size="icon" onClick={() => openEdit(record)} title="Edit record"><Pencil className="h-4 w-4" /></Button>
+                    <Button variant="ghost" size="icon" onClick={() => setConfirmRecordId(record.id)} title="Delete record"><Trash2 className="h-4 w-4 text-red-500" /></Button>
+                  </div>
+                </TableCell>
               </TableRow>
             ))}
             {(records.length === 0 || loading) && (
@@ -303,6 +413,10 @@ function validateRecordContent(type: DnsRecord["type"], rawContent: string) {
     return "TXT record content is too long.";
   }
   return "";
+}
+
+function canProxy(type: DnsRecord["type"]) {
+  return type === "A" || type === "AAAA" || type === "CNAME";
 }
 
 function isDomain(value: string) {

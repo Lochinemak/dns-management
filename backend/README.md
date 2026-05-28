@@ -52,6 +52,7 @@ All endpoints are under `/api/v1`. Use `Authorization: Bearer <jwt>` after login
 | `POST` | `/subdomains` | Apply for a subdomain with `{ "domainId": "...", "prefix": "blog" }` |
 | `GET` | `/subdomains/{id}/records` | List DNS records |
 | `POST` | `/subdomains/{id}/records` | Create local DNS record |
+| `PATCH` | `/subdomains/{id}/records/{recordId}` | Update local DNS record |
 | `DELETE` | `/subdomains/{id}/records/{recordId}` | Delete local DNS record |
 | `GET` | `/tokens` | List API token metadata |
 | `POST` | `/tokens` | Create API token; plaintext token is returned once |

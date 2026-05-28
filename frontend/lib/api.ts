@@ -101,6 +101,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(record),
     }),
+  updateRecord: (subdomainId: string, recordId: string, record: Omit<DnsRecord, "id" | "subdomainId">) =>
+    apiFetch<DnsRecord>(`/subdomains/${subdomainId}/records/${recordId}`, {
+      method: "PATCH",
+      body: JSON.stringify(record),
+    }),
   deleteRecord: (subdomainId: string, recordId: string) =>
     apiFetch<void>(`/subdomains/${subdomainId}/records/${recordId}`, { method: "DELETE" }),
   tokens: () => apiFetch<ApiToken[]>("/tokens"),

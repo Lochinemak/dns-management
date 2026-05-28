@@ -254,6 +254,14 @@ func (s *Server) frontend(w http.ResponseWriter, r *http.Request) {
 		filePath = filepath.Join(filePath, "index.html")
 		info, err = os.Stat(filePath)
 	}
+	if (err != nil || info.IsDir()) && cleanPath != "." && !strings.Contains(filepath.Base(cleanPath), ".") {
+		htmlPath := filepath.Join(s.frontendDir, cleanPath+".html")
+		if htmlInfo, htmlErr := os.Stat(htmlPath); htmlErr == nil && !htmlInfo.IsDir() {
+			filePath = htmlPath
+			info = htmlInfo
+			err = nil
+		}
+	}
 	if err != nil || info.IsDir() {
 		if strings.HasPrefix(cleanPath, "_next") || strings.Contains(filepath.Base(cleanPath), ".") {
 			http.NotFound(w, r)

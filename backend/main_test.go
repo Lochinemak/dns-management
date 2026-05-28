@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,6 +105,33 @@ func TestDNSQueryValidation(t *testing.T) {
 	srv.dnsQuery(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("dns validation status = %d", rec.Code)
+	}
+}
+
+func TestFrontendServesExportedCleanURLHTML(t *testing.T) {
+	db, _, err := sqlmock.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("home page"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "admin.html"), []byte("admin page"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(db, "test-secret", "test-secret")
+	srv.frontendDir = dir
+
+	resp := request(srv, http.MethodGet, "/admin", "", "")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("frontend status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if body := resp.Body.String(); body != "admin page" {
+		t.Fatalf("frontend body = %q, want admin page", body)
 	}
 }
 

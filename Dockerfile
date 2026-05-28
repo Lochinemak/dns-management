@@ -3,6 +3,7 @@
 FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend-build
 WORKDIR /src/frontend
 COPY frontend/package*.json ./
+RUN npm install -g npm@11.6.1
 RUN npm ci
 COPY frontend/ ./
 RUN npm run build

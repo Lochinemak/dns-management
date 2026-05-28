@@ -1,0 +1,40 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: dns_management
+      MYSQL_USER: dns_management
+      MYSQL_PASSWORD: change-me
+      MYSQL_ROOT_PASSWORD: change-root-password
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # Uncomment only for local database debugging. Do not expose MySQL publicly.
+    # ports:
+    #   - "3306:3306"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_DSN: dns_management:change-me@tcp(mysql:3306)/dns_management?charset=utf8mb4&parseTime=true&loc=Local
+      JWT_SECRET: change-to-a-long-random-secret
+      TOKEN_ENCRYPTION_KEY: change-to-another-long-random-secret
+      ADDR: :8080
+      FRONTEND_DIR: /app/public
+    ports:
+      - "8080:8080"
+
+volumes:
+  mysql-data:

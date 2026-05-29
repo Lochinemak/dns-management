@@ -223,9 +223,12 @@ export default function AdminConsole() {
             <form onSubmit={addReservedSubdomain} className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end">
               <div className="space-y-2">
                 <Label>Root Domain</Label>
-                <Select value={reservedDomainId} onValueChange={(value) => value && setReservedDomainId(value)}>
+                <Select
+                  value={domains.find((domain) => domain.id === reservedDomainId)?.name || ""}
+                  onValueChange={(value) => value && setReservedDomainId(domains.find((domain) => domain.name === value)?.id || "")}
+                >
                   <SelectTrigger><SelectValue placeholder="Select domain" /></SelectTrigger>
-                  <SelectContent>{domains.map((domain) => <SelectItem key={domain.id} value={domain.id}>{domain.name}</SelectItem>)}</SelectContent>
+                  <SelectContent>{domains.map((domain) => <SelectItem key={domain.id} value={domain.name}>{domain.name}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
               <div className="space-y-2"><Label>Prefix</Label><Input placeholder="admin" value={reservedPrefix} onChange={(e) => setReservedPrefix(e.target.value)} required /></div>

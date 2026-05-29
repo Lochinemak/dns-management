@@ -13,7 +13,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { toast } from "sonner";
 
 export default function DnsQueryTool() {
-  const [name, setName] = useState("example.com");
+  const [name, setName] = useState("");
   const [type, setType] = useState<DnsRecordType>("A");
   const [result, setResult] = useState<DnsQueryResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -36,7 +36,7 @@ export default function DnsQueryTool() {
       <CardHeader><CardTitle className="flex items-center gap-2"><Search className="h-5 w-5" />DNS Lookup</CardTitle></CardHeader>
       <CardContent className="space-y-4">
         <form onSubmit={submit} className="grid gap-4 md:grid-cols-[1fr_160px_auto] items-end">
-          <div className="space-y-2"><Label>Domain</Label><Input value={name} onChange={(e) => setName(e.target.value)} required /></div>
+          <div className="space-y-2"><Label>Domain</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="example.com" required /></div>
           <div className="space-y-2">
             <Label>Type</Label>
             <Select value={type} onValueChange={(value) => value && setType(value as DnsRecordType)}>

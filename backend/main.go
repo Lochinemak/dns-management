@@ -84,6 +84,16 @@ type Subdomain struct {
 	CreatedAt    time.Time  `json:"createdAt"`
 }
 
+type ReservedSubdomain struct {
+	ID         string    `json:"id"`
+	DomainID   string    `json:"domainId"`
+	DomainName string    `json:"domainName"`
+	Prefix     string    `json:"prefix"`
+	FullDomain string    `json:"fullDomain"`
+	CreatedBy  string    `json:"createdBy"`
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 type DNSRecord struct {
 	ID                 string    `json:"id"`
 	SubdomainID        string    `json:"subdomainId"`
@@ -201,6 +211,17 @@ func (s *Server) migrate(ctx context.Context) error {
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			INDEX idx_dns_records_subdomain (subdomain_id),
 			FOREIGN KEY (subdomain_id) REFERENCES subdomains(id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE IF NOT EXISTS reserved_subdomains (
+			id VARCHAR(64) PRIMARY KEY,
+			domain_id VARCHAR(64) NOT NULL,
+			prefix VARCHAR(63) NOT NULL,
+			created_by VARCHAR(64) NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE KEY uniq_reserved_subdomain (domain_id, prefix),
+			INDEX idx_reserved_subdomains_domain (domain_id),
+			FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE,
+			FOREIGN KEY (created_by) REFERENCES users(id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS api_tokens (
 			id VARCHAR(64) PRIMARY KEY,
@@ -577,6 +598,16 @@ func (s *Server) createSubdomain(w http.ResponseWriter, r *http.Request, user Us
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not load domain")
+		return
+	}
+	var reservedCount int
+	err = s.db.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM reserved_subdomains WHERE domain_id = ? AND prefix = ?`, req.DomainID, prefix).Scan(&reservedCount)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not inspect reserved subdomains")
+		return
+	}
+	if reservedCount > 0 {
+		writeError(w, http.StatusConflict, "subdomain is reserved")
 		return
 	}
 	id := newID("sub")
@@ -1035,6 +1066,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, parts []str
 		s.handleAdminDomains(w, r, parts[1:])
 	case "subdomains":
 		s.handleAdminSubdomains(w, r, parts[1:])
+	case "reserved-subdomains":
+		s.handleAdminReservedSubdomains(w, r, parts[1:])
 	case "users":
 		s.handleAdminUsers(w, r, parts[1:])
 	default:
@@ -1174,6 +1207,78 @@ func (s *Server) handleAdminSubdomains(w http.ResponseWriter, r *http.Request, p
 			s.reviewSubdomain(w, r, parts[0], "rejected")
 			return
 		}
+	}
+	writeError(w, http.StatusNotFound, "route not found")
+}
+
+func (s *Server) handleAdminReservedSubdomains(w http.ResponseWriter, r *http.Request, parts []string) {
+	if len(parts) == 0 {
+		switch r.Method {
+		case http.MethodGet:
+			rows, err := s.db.QueryContext(r.Context(), `SELECT rs.id, rs.domain_id, d.name, rs.prefix, rs.created_by, rs.created_at
+				FROM reserved_subdomains rs JOIN domains d ON d.id = rs.domain_id
+				ORDER BY d.name, rs.prefix`)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not list reserved subdomains")
+				return
+			}
+			defer rows.Close()
+			reserved, err := scanReservedSubdomains(rows)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not scan reserved subdomains")
+				return
+			}
+			writeJSON(w, http.StatusOK, reserved)
+		case http.MethodPost:
+			var req struct {
+				DomainID string `json:"domainId"`
+				Prefix   string `json:"prefix"`
+			}
+			if !decodeJSON(w, r, &req) {
+				return
+			}
+			prefix := strings.ToLower(strings.TrimSpace(req.Prefix))
+			if !prefixPattern.MatchString(prefix) {
+				writeError(w, http.StatusBadRequest, "invalid prefix")
+				return
+			}
+			var domainName string
+			if err := s.db.QueryRowContext(r.Context(), `SELECT name FROM domains WHERE id = ?`, req.DomainID).Scan(&domainName); errors.Is(err, sql.ErrNoRows) {
+				writeError(w, http.StatusBadRequest, "domain is not available")
+				return
+			} else if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not load domain")
+				return
+			}
+			user := currentUser(r)
+			id := newID("rsv")
+			_, err := s.db.ExecContext(r.Context(), `INSERT INTO reserved_subdomains (id, domain_id, prefix, created_by) VALUES (?, ?, ?, ?)`, id, req.DomainID, prefix, user.ID)
+			if isDuplicate(err) {
+				writeError(w, http.StatusConflict, "reserved subdomain already exists")
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not create reserved subdomain")
+				return
+			}
+			writeJSON(w, http.StatusCreated, ReservedSubdomain{ID: id, DomainID: req.DomainID, DomainName: domainName, Prefix: prefix, FullDomain: prefix + "." + domainName, CreatedBy: user.ID, CreatedAt: s.now()})
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+	if len(parts) == 1 && r.Method == http.MethodDelete {
+		res, err := s.db.ExecContext(r.Context(), `DELETE FROM reserved_subdomains WHERE id = ?`, parts[0])
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not delete reserved subdomain")
+			return
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			writeError(w, http.StatusNotFound, "reserved subdomain not found")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 	writeError(w, http.StatusNotFound, "route not found")
 }
@@ -1696,6 +1801,19 @@ func scanSubdomains(rows *sql.Rows) ([]Subdomain, error) {
 		}
 		s.FullDomain = s.Prefix + "." + s.DomainName
 		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func scanReservedSubdomains(rows *sql.Rows) ([]ReservedSubdomain, error) {
+	out := make([]ReservedSubdomain, 0)
+	for rows.Next() {
+		var r ReservedSubdomain
+		if err := rows.Scan(&r.ID, &r.DomainID, &r.DomainName, &r.Prefix, &r.CreatedBy, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		r.FullDomain = r.Prefix + "." + r.DomainName
+		out = append(out, r)
 	}
 	return out, rows.Err()
 }

@@ -31,6 +31,16 @@ export type Subdomain = {
   createdAt: string;
 };
 
+export type ReservedSubdomain = {
+  id: string;
+  domainId: string;
+  domainName: string;
+  prefix: string;
+  fullDomain: string;
+  createdBy: string;
+  createdAt: string;
+};
+
 export type DnsRecord = {
   id: string;
   subdomainId: string;

@@ -1,6 +1,6 @@
 "use client";
 
-import type { ApiToken, DnsRecord, DnsRecordType, Domain, Subdomain, User } from "@/lib/mock-data";
+import type { ApiToken, DnsRecord, DnsRecordType, Domain, ReservedSubdomain, Subdomain, User } from "@/lib/mock-data";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "/api/v1";
 const TOKEN_KEY = "dns_hub_token";
@@ -136,6 +136,14 @@ export const api = {
       body: JSON.stringify(body),
     }),
   deleteAdminDomain: (id: string) => apiFetch<void>(`/admin/domains/${id}`, { method: "DELETE" }),
+  adminReservedSubdomains: () => apiFetch<ReservedSubdomain[]>("/admin/reserved-subdomains"),
+  createAdminReservedSubdomain: (body: { domainId: string; prefix: string }) =>
+    apiFetch<ReservedSubdomain>("/admin/reserved-subdomains", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteAdminReservedSubdomain: (id: string) =>
+    apiFetch<void>(`/admin/reserved-subdomains/${id}`, { method: "DELETE" }),
   adminSubdomains: (status = "") =>
     apiFetch<Subdomain[]>(`/admin/subdomains${status ? `?status=${encodeURIComponent(status)}` : ""}`),
   approveSubdomain: (id: string) =>

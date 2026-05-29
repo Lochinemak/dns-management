@@ -48,7 +48,10 @@ export default function SubdomainList() {
   };
 
   useEffect(() => {
-    load();
+    const timeout = window.setTimeout(() => {
+      void load();
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, []);
 
   const handleApply = async (e: React.FormEvent) => {

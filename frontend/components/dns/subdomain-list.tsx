@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { Ban, Clock, Globe, Plus, Settings2, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { Domain, Subdomain } from "@/lib/mock-data";
@@ -14,7 +15,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { toast } from "sonner";
-import DnsManager from "./dns-manager";
+
+const DnsManager = dynamic(() => import("./dns-manager"), {
+  loading: () => (
+    <div className="rounded-lg border border-dashed bg-white py-12 text-center text-sm text-slate-500 dark:bg-slate-900">
+      Loading DNS records...
+    </div>
+  ),
+});
 
 export default function SubdomainList() {
   const [subdomains, setSubdomains] = useState<Subdomain[]>([]);

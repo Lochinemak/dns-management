@@ -1,0 +1,20 @@
+services:
+  app:
+    platform: ${APP_PLATFORM:-linux/arm64}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Override MYSQL_DSN if your host MySQL uses a different user, password,
+      # port, or database. Keep the @tcp(host:port) wrapper required by the Go
+      # MySQL driver.
+      MYSQL_DSN: "${MYSQL_DSN:-dns_management:change-me@tcp(host.docker.internal:3306)/dns_management?charset=utf8mb4&parseTime=true&loc=Local}"
+      JWT_SECRET: change-to-a-long-random-secret
+      TOKEN_ENCRYPTION_KEY: change-to-another-long-random-secret
+      ADDR: :8080
+      FRONTEND_DIR: /app/public
+    ports:
+      - "8080:8080"

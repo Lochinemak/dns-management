@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH:-$(go env GOARCH)} go bui
 
 FROM alpine:3.22
 WORKDIR /app
-RUN addgroup -S app && adduser -S app -G app
+RUN addgroup -S app && adduser -S app -G app && mkdir -p /data && chown app:app /data
 COPY --from=backend-build /out/dns-management /app/dns-management
 COPY --from=frontend-build /src/frontend/out /app/public
 ENV ADDR=:8080

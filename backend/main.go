@@ -27,14 +27,23 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
+	_ "modernc.org/sqlite"
 )
 
 const (
-	defaultAddr      = ":8080"
-	defaultJWTSecret = "dev-change-me"
+	defaultAddr        = ":8080"
+	defaultJWTSecret   = "dev-change-me"
+	upsertDNSRecordSQL = `INSERT INTO dns_records (id, subdomain_id, type, name, content, ttl, proxied, cloudflare_record_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(cloudflare_record_id) DO UPDATE SET
+			subdomain_id = excluded.subdomain_id,
+			type = excluded.type,
+			name = excluded.name,
+			content = excluded.content,
+			ttl = excluded.ttl,
+			proxied = excluded.proxied`
 )
 
 var (
@@ -129,22 +138,34 @@ type Server struct {
 }
 
 func main() {
-	dsn := strings.TrimSpace(os.Getenv("MYSQL_DSN"))
-	if dsn == "" {
-		log.Fatal("MYSQL_DSN is required, for example root:password@tcp(127.0.0.1:3306)/dns_management?parseTime=true&multiStatements=true")
+	databasePath := env("SQLITE_PATH", "data/dns-management.db")
+	if databasePath != ":memory:" {
+		if err := os.MkdirAll(filepath.Dir(databasePath), 0o750); err != nil {
+			log.Fatalf("create sqlite directory: %v", err)
+		}
 	}
-	db, err := sql.Open("mysql", ensureDSNOptions(dsn))
+	db, err := sql.Open("sqlite", databasePath)
 	if err != nil {
-		log.Fatalf("open mysql: %v", err)
+		log.Fatalf("open sqlite: %v", err)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(1)
 	if err := db.Ping(); err != nil {
-		log.Fatalf("ping mysql: %v", err)
+		log.Fatalf("ping sqlite: %v", err)
+	}
+	for _, pragma := range []string{
+		`PRAGMA foreign_keys = ON`,
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA busy_timeout = 5000`,
+	} {
+		if _, err := db.Exec(pragma); err != nil {
+			log.Fatalf("configure sqlite: %v", err)
+		}
 	}
 
 	srv := NewServer(db, env("JWT_SECRET", defaultJWTSecret), env("TOKEN_ENCRYPTION_KEY", env("JWT_SECRET", defaultJWTSecret)))
 	if err := srv.migrate(context.Background()); err != nil {
-		log.Fatalf("migrate mysql: %v", err)
+		log.Fatalf("migrate sqlite: %v", err)
 	}
 
 	addr := env("ADDR", defaultAddr)
@@ -170,7 +191,7 @@ func (s *Server) migrate(ctx context.Context) error {
 			id VARCHAR(64) PRIMARY KEY,
 			email VARCHAR(255) NOT NULL UNIQUE,
 			nickname VARCHAR(255) NOT NULL,
-			role ENUM('user','admin') NOT NULL DEFAULT 'user',
+			role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','admin')),
 			password_hash VARCHAR(255) NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -181,21 +202,19 @@ func (s *Server) migrate(ctx context.Context) error {
 			api_token_encrypted TEXT NOT NULL,
 			enabled BOOLEAN NOT NULL DEFAULT TRUE,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE TABLE IF NOT EXISTS subdomains (
 			id VARCHAR(64) PRIMARY KEY,
 			owner_id VARCHAR(64) NOT NULL,
 			domain_id VARCHAR(64) NOT NULL,
 			prefix VARCHAR(63) NOT NULL,
-			status ENUM('pending','active','rejected','suspended') NOT NULL DEFAULT 'pending',
+			status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','rejected','suspended')),
 			reject_reason TEXT NULL,
 			reviewed_by VARCHAR(64) NULL,
 			reviewed_at TIMESTAMP NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE KEY uniq_subdomain (domain_id, prefix),
-			INDEX idx_subdomains_owner (owner_id),
-			INDEX idx_subdomains_status (status),
+			UNIQUE (domain_id, prefix),
 			FOREIGN KEY (owner_id) REFERENCES users(id),
 			FOREIGN KEY (domain_id) REFERENCES domains(id)
 		)`,
@@ -209,7 +228,6 @@ func (s *Server) migrate(ctx context.Context) error {
 			proxied BOOLEAN NOT NULL DEFAULT FALSE,
 			cloudflare_record_id VARCHAR(255) NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			INDEX idx_dns_records_subdomain (subdomain_id),
 			FOREIGN KEY (subdomain_id) REFERENCES subdomains(id) ON DELETE CASCADE
 		)`,
 		`CREATE TABLE IF NOT EXISTS reserved_subdomains (
@@ -218,8 +236,7 @@ func (s *Server) migrate(ctx context.Context) error {
 			prefix VARCHAR(63) NOT NULL,
 			created_by VARCHAR(64) NOT NULL,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE KEY uniq_reserved_subdomain (domain_id, prefix),
-			INDEX idx_reserved_subdomains_domain (domain_id),
+			UNIQUE (domain_id, prefix),
 			FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE,
 			FOREIGN KEY (created_by) REFERENCES users(id)
 		)`,
@@ -229,19 +246,23 @@ func (s *Server) migrate(ctx context.Context) error {
 			name VARCHAR(255) NOT NULL,
 			token_hash CHAR(64) NOT NULL UNIQUE,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			INDEX idx_api_tokens_user (user_id),
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_subdomains_owner ON subdomains(owner_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_subdomains_status ON subdomains(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_records_subdomain ON dns_records(subdomain_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_reserved_subdomains_domain ON reserved_subdomains(domain_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	if err := s.ensureColumn(ctx, "dns_records", "cloudflare_record_id", `ALTER TABLE dns_records ADD COLUMN cloudflare_record_id VARCHAR(255) NULL AFTER proxied`); err != nil {
+	if err := s.ensureColumn(ctx, "dns_records", "cloudflare_record_id", `ALTER TABLE dns_records ADD COLUMN cloudflare_record_id VARCHAR(255) NULL`); err != nil {
 		return err
 	}
-	if err := s.ensureIndex(ctx, "dns_records", "uniq_dns_records_cloudflare", `ALTER TABLE dns_records ADD UNIQUE KEY uniq_dns_records_cloudflare (cloudflare_record_id)`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS uniq_dns_records_cloudflare ON dns_records(cloudflare_record_id)`); err != nil {
 		return err
 	}
 	return nil
@@ -701,7 +722,10 @@ func (s *Server) deleteRecord(w http.ResponseWriter, r *http.Request, user User,
 			return
 		}
 	}
-	res, err := s.db.ExecContext(r.Context(), `DELETE dr FROM dns_records dr JOIN subdomains s ON s.id = dr.subdomain_id WHERE dr.id = ? AND dr.subdomain_id = ? AND (s.owner_id = ? OR ? = 'admin')`, recordID, subID, user.ID, user.Role)
+	res, err := s.db.ExecContext(r.Context(), `DELETE FROM dns_records
+		WHERE id = ? AND subdomain_id = ? AND EXISTS (
+			SELECT 1 FROM subdomains s WHERE s.id = dns_records.subdomain_id AND (s.owner_id = ? OR ? = 'admin')
+		)`, recordID, subID, user.ID, user.Role)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not delete record")
 		return
@@ -929,9 +953,7 @@ func (s *Server) syncRecords(w http.ResponseWriter, r *http.Request, user User, 
 			record.TTL = 1
 		}
 		seen = append(seen, record.ID)
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO dns_records (id, subdomain_id, type, name, content, ttl, proxied, cloudflare_record_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-			ON DUPLICATE KEY UPDATE id = id, type = VALUES(type), name = VALUES(name), content = VALUES(content), ttl = VALUES(ttl), proxied = VALUES(proxied)`,
+		_, err = tx.ExecContext(r.Context(), upsertDNSRecordSQL,
 			newID("dns"), subID, record.Type, localName, record.Content, record.TTL, record.Proxied, record.ID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not upsert synced record")
@@ -1145,13 +1167,13 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request, part
 					writeError(w, http.StatusBadRequest, "invalid domain name")
 					return
 				}
-				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET name = ? WHERE id = ?`, name, parts[0]); err != nil {
+				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, name, parts[0]); err != nil {
 					writeError(w, http.StatusInternalServerError, "could not update domain")
 					return
 				}
 			}
 			if req.ZoneID != nil {
-				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET zone_id = ? WHERE id = ?`, *req.ZoneID, parts[0]); err != nil {
+				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET zone_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, *req.ZoneID, parts[0]); err != nil {
 					writeError(w, http.StatusInternalServerError, "could not update zone id")
 					return
 				}
@@ -1162,13 +1184,13 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request, part
 					writeError(w, http.StatusInternalServerError, "could not encrypt token")
 					return
 				}
-				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET api_token_encrypted = ? WHERE id = ?`, encrypted, parts[0]); err != nil {
+				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET api_token_encrypted = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, encrypted, parts[0]); err != nil {
 					writeError(w, http.StatusInternalServerError, "could not update api token")
 					return
 				}
 			}
 			if req.Enabled != nil {
-				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET enabled = ? WHERE id = ?`, *req.Enabled, parts[0]); err != nil {
+				if _, err := s.db.ExecContext(r.Context(), `UPDATE domains SET enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, *req.Enabled, parts[0]); err != nil {
 					writeError(w, http.StatusInternalServerError, "could not update domain")
 					return
 				}
@@ -1464,7 +1486,7 @@ func (s *Server) userFromJWT(ctx context.Context, raw string) (User, error) {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
 		return s.jwtSecret, nil
-	})
+	}, jwt.WithTimeFunc(s.now))
 	if err != nil || !token.Valid {
 		return User{}, fmt.Errorf("invalid token")
 	}
@@ -1517,26 +1539,30 @@ func (s *Server) decrypt(value string) (string, error) {
 }
 
 func (s *Server) ensureColumn(ctx context.Context, table, column, alter string) error {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`, table, column).Scan(&count)
+	if !regexp.MustCompile(`^[a-z_]+$`).MatchString(table) {
+		return fmt.Errorf("invalid table name %q", table)
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return err
 	}
-	if count > 0 {
-		return nil
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Close()
+		}
 	}
-	_, err = s.db.ExecContext(ctx, alter)
-	return err
-}
-
-func (s *Server) ensureIndex(ctx context.Context, table, index, alter string) error {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`, table, index).Scan(&count)
-	if err != nil {
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
 	}
-	if count > 0 {
-		return nil
+	if err := rows.Close(); err != nil {
+		return err
 	}
 	_, err = s.db.ExecContext(ctx, alter)
 	return err
@@ -1911,17 +1937,11 @@ func nullable(value string) any {
 }
 
 func isDuplicate(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Duplicate entry")
-}
-
-func ensureDSNOptions(dsn string) string {
-	if strings.Contains(dsn, "?") {
-		if !strings.Contains(dsn, "parseTime=") {
-			return dsn + "&parseTime=true"
-		}
-		return dsn
+	if err == nil {
+		return false
 	}
-	return dsn + "?parseTime=true"
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "unique constraint failed")
 }
 
 func env(name, fallback string) string {

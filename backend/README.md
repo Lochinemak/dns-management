@@ -1,14 +1,14 @@
 # DNS Management Backend
 
-Go backend for DNS Hub with MySQL persistence, JWT login, admin approval, API tokens, and DNS lookup through Cloudflare `1.1.1.1` DNS-over-HTTPS.
+Go backend for DNS Hub with SQLite persistence, JWT login, admin approval, API tokens, and DNS lookup through Cloudflare `1.1.1.1` DNS-over-HTTPS.
 
 ## Run
 
-Create a MySQL database, then run:
+Run the backend directly; it creates the SQLite database and tables automatically:
 
 ```powershell
 cd backend
-$env:MYSQL_DSN='root:password@tcp(127.0.0.1:3306)/dns_management?charset=utf8mb4&parseTime=true&loc=Local'
+$env:SQLITE_PATH='data/dns-management.db'
 $env:JWT_SECRET='change-me'
 $env:TOKEN_ENCRYPTION_KEY='change-me-too'
 go run .
@@ -33,7 +33,7 @@ After setup, sign in with that administrator and add one or more root domains in
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MYSQL_DSN` | required | MySQL DSN for `github.com/go-sql-driver/mysql` |
+| `SQLITE_PATH` | `data/dns-management.db` | SQLite database file path; use a persistent volume in containers |
 | `JWT_SECRET` | `dev-change-me` | JWT signing secret |
 | `TOKEN_ENCRYPTION_KEY` | `JWT_SECRET` | Secret used to encrypt Cloudflare API tokens |
 | `ADDR` | `:8080` | HTTP listen address |

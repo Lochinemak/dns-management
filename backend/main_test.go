@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -229,7 +230,7 @@ func TestCreateReservedSubdomainRejectsDuplicateRule(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow("example.com"))
 	mock.ExpectExec("INSERT INTO reserved_subdomains").
 		WithArgs(sqlmock.AnyArg(), "dom-1", "admin", "u-admin").
-		WillReturnError(errors.New("Error 1062: Duplicate entry 'dom-1-admin' for key 'uniq_reserved_subdomain'"))
+		WillReturnError(errors.New("constraint failed: UNIQUE constraint failed: reserved_subdomains.domain_id, reserved_subdomains.prefix (2067)"))
 
 	req := contextWithUser(httptest.NewRequest(http.MethodPost, "/api/v1/admin/reserved-subdomains", strings.NewReader(`{"domainId":"dom-1","prefix":"admin"}`)), admin)
 	rec := httptest.NewRecorder()
@@ -239,6 +240,90 @@ func TestCreateReservedSubdomainRejectsDuplicateRule(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSQLiteMigrationAndSetup(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "dns-management.db")
+	db, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{`PRAGMA foreign_keys = ON`, `PRAGMA journal_mode = WAL`, `PRAGMA busy_timeout = 5000`} {
+		if _, err := db.Exec(pragma); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := NewServer(db, "test-secret", "test-token-secret")
+	if err := srv.migrate(context.Background()); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+	if err := srv.migrate(context.Background()); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+
+	status := request(srv, http.MethodGet, "/api/v1/setup/status", "", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"initialized":false`) {
+		t.Fatalf("initial setup status = %d body = %s", status.Code, status.Body.String())
+	}
+
+	created := request(srv, http.MethodPost, "/api/v1/setup/admin", `{"email":"admin@example.com","nickname":"Admin","password":"password123"}`, "")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create admin status = %d body = %s", created.Code, created.Body.String())
+	}
+
+	status = request(srv, http.MethodGet, "/api/v1/setup/status", "", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"initialized":true`) {
+		t.Fatalf("initialized setup status = %d body = %s", status.Code, status.Body.String())
+	}
+}
+
+func TestSQLiteDNSRecordUpsert(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "dns-management.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewServer(db, "test-secret", "test-token-secret")
+	if err := srv.migrate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO users (id, email, nickname, role, password_hash) VALUES ('usr-1', 'user@example.com', 'User', 'user', 'hash')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO domains (id, name, zone_id, api_token_encrypted) VALUES ('dom-1', 'example.com', 'zone-1', 'token')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO subdomains (id, owner_id, domain_id, prefix, status) VALUES ('sub-1', 'usr-1', 'dom-1', 'www', 'active')`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(upsertDNSRecordSQL, "dns-1", "sub-1", "A", "@", "192.0.2.1", 60, false, "cf-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(upsertDNSRecordSQL, "dns-2", "sub-1", "A", "@", "192.0.2.2", 3600, true, "cf-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	var id, content string
+	var ttl, count int
+	var proxied bool
+	if err := db.QueryRow(`SELECT id, content, ttl, proxied FROM dns_records WHERE cloudflare_record_id = 'cf-1'`).Scan(&id, &content, &ttl, &proxied); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM dns_records WHERE cloudflare_record_id = 'cf-1'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if id != "dns-1" || content != "192.0.2.2" || ttl != 3600 || !proxied || count != 1 {
+		t.Fatalf("upsert result: id=%q content=%q ttl=%d proxied=%v count=%d", id, content, ttl, proxied, count)
 	}
 }
 

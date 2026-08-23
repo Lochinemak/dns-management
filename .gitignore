@@ -15,11 +15,15 @@ frontend/tsconfig.tsbuildinfo
 *.exe
 *.test
 coverage.out
+*.db
+*.db-shm
+*.db-wal
 
 # Environment and secrets
 .env
 .env.*
 !.env.example
+/compose.yml
 
 # Logs and local caches
 *.log
